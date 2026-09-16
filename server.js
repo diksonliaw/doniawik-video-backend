@@ -7,8 +7,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 
 const app = express();
-const PORT = 5000;
-
+const PORT = process.env.PORT || 5000;
 const uploadFolder = path.join(__dirname, "uploads");
 const processedFolder = path.join(__dirname, "processed");
 
