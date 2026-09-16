@@ -7,7 +7,9 @@ const fs = require("fs");
 const crypto = require("crypto");
 
 const app = express();
+
 const PORT = process.env.PORT || 5000;
+
 const uploadFolder = path.join(__dirname, "uploads");
 const processedFolder = path.join(__dirname, "processed");
 
@@ -22,30 +24,31 @@ const storage = multer.diskStorage({
     },
 
     filename: (req, file, cb) => {
-        const id = crypto.randomUUID();
-
-        cb(null, `${id}.mp4`);
+        cb(null, `${crypto.randomUUID()}.mp4`);
     }
 });
 
 const upload = multer({
-    storage: storage,
+    storage,
 
     limits: {
         fileSize: 500 * 1024 * 1024
     },
 
-   fileFilter: (req, file, cb) => {
-    const isMp4 =
-        file.mimetype === "video/mp4" ||
-        path.extname(file.originalname).toLowerCase() === ".mp4";
+    fileFilter: (req, file, cb) => {
 
-    if (!isMp4) {
-        return cb(new Error("Only MP4 videos are supported."));
+        const isMp4 =
+            file.mimetype === "video/mp4" ||
+            path.extname(file.originalname).toLowerCase() === ".mp4";
+
+        if (!isMp4) {
+            return cb(
+                new Error("Only MP4 videos are supported.")
+            );
+        }
+
+        cb(null, true);
     }
-
-    cb(null, true);
-}
 });
 
 app.get("/", (req, res) => {
@@ -54,104 +57,149 @@ app.get("/", (req, res) => {
     });
 });
 
-app.post("/api/optimize", upload.single("video"), (req, res) => {
+app.get("/api/health", (req, res) => {
+    res.json({
+        status: "online",
+        service: "Doniawik Video Optimizer"
+    });
+});
 
-    if (!req.file) {
-        return res.status(400).json({
-            error: "No video uploaded."
-        });
-    }
+app.post(
+    "/api/optimize",
+    upload.single("video"),
+    async (req, res) => {
 
-    const inputFile = req.file.path;
+        if (!req.file) {
+            return res.status(400).json({
+                error: "No video uploaded."
+            });
+        }
 
-    const outputFile = path.join(
-        processedFolder,
-        `${path.parse(req.file.filename).name}-optimized.mp4`
-    );
+        const inputFile = req.file.path;
 
-    console.log("Received:", req.file.originalname);
+        const outputFile = path.join(
+            processedFolder,
+            `${path.parse(req.file.filename).name}-optimized.mp4`
+        );
 
-    ffmpeg(inputFile)
-    .inputOptions([
-        "-itsscale 2"
-    ])
+        console.log(
+            `Received video: ${req.file.originalname}`
+        );
 
-    .outputOptions([
-        "-pix_fmt yuv420p",
-        "-movflags +faststart"
-    ])
+        console.log(
+            `File size: ${(req.file.size / 1024 / 1024).toFixed(2)} MB`
+        );
 
-    .videoCodec("libx264")
+        ffmpeg(inputFile)
 
-        .on("start", command => {
-            console.log("FFmpeg started:");
-            console.log(command);
-        })
+            .videoCodec("libx264")
 
-        .on("progress", progress => {
-            console.log(
-                `Processing: ${Math.round(progress.percent || 0)}%`
-            );
-        })
+            .outputOptions([
+                "-preset ultrafast",
+                "-crf 23",
+                "-pix_fmt yuv420p",
+                "-c:a aac",
+                "-b:a 128k",
+                "-movflags +faststart"
+            ])
 
-        .on("end", () => {
+            .on("start", command => {
+                console.log("FFmpeg started:");
+                console.log(command);
+            })
 
-            console.log("Processing complete!");
+            .on("progress", progress => {
 
-            res.download(
-                outputFile,
-                "optimized-video.mp4",
-                error => {
+                const percent =
+                    Math.round(progress.percent || 0);
 
-                    fs.unlink(inputFile, () => {});
-                    fs.unlink(outputFile, () => {});
+                console.log(
+                    `Processing: ${percent}%`
+                );
+            })
 
-                    if (error) {
-                        console.error(
-                            "Download error:",
-                            error
+            .on("end", () => {
+
+                console.log(
+                    "Optimization complete!"
+                );
+
+                res.download(
+                    outputFile,
+                    "optimized-video.mp4",
+                    error => {
+
+                        fs.unlink(
+                            inputFile,
+                            () => {}
                         );
+
+                        fs.unlink(
+                            outputFile,
+                            () => {}
+                        );
+
+                        if (error) {
+                            console.error(
+                                "Download error:",
+                                error
+                            );
+                        }
                     }
+                );
+            })
+
+            .on("error", error => {
+
+                console.error(
+                    "FFmpeg error:",
+                    error.message
+                );
+
+                fs.unlink(
+                    inputFile,
+                    () => {}
+                );
+
+                fs.unlink(
+                    outputFile,
+                    () => {}
+                );
+
+                if (!res.headersSent) {
+
+                    res.status(500).json({
+                        error:
+                            "Video processing failed.",
+                        details:
+                            error.message
+                    });
                 }
-            );
-        })
+            })
 
-        .on("error", error => {
-
-            console.error(
-                "FFmpeg error:",
-                error.message
-            );
-
-            fs.unlink(inputFile, () => {});
-            fs.unlink(outputFile, () => {});
-
-            if (!res.headersSent) {
-                res.status(500).json({
-                    error: "Video processing failed.",
-                    details: error.message
-                });
-            }
-        })
-
-        .save(outputFile);
-});
-
-app.use((error, req, res, next) => {
-
-    console.error(error);
-
-    if (!res.headersSent) {
-        res.status(400).json({
-            error: error.message
-        });
+            .save(outputFile);
     }
-});
+);
 
-app.listen(PORT, () => {
+app.use(
+    (error, req, res, next) => {
 
-    console.log(
-        `Video Optimizer API running at http://localhost:${PORT}`
-    );
+        console.error(error);
 
-});
+        if (!res.headersSent) {
+            res.status(400).json({
+                error: error.message
+            });
+        }
+    }
+);
+
+app.listen(
+    PORT,
+    () => {
+
+        console.log(
+            `Doniawik Video Optimizer running on port ${PORT}`
+        );
+    }
+);
