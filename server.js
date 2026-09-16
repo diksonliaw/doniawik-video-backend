@@ -18,6 +18,12 @@ fs.mkdirSync(processedFolder, { recursive: true });
 
 app.use(cors());
 
+/*
+|--------------------------------------------------------------------------
+| Upload configuration
+|--------------------------------------------------------------------------
+*/
+
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         cb(null, uploadFolder);
@@ -51,18 +57,44 @@ const upload = multer({
     }
 });
 
+/*
+|--------------------------------------------------------------------------
+| Job storage
+|--------------------------------------------------------------------------
+*/
+
+const jobs = new Map();
+
+/*
+|--------------------------------------------------------------------------
+| Basic routes
+|--------------------------------------------------------------------------
+*/
+
 app.get("/", (req, res) => {
+
     res.json({
         message: "Video Optimizer API is running!"
     });
+
 });
 
+
 app.get("/api/health", (req, res) => {
+
     res.json({
         status: "online",
         service: "Doniawik Video Optimizer"
     });
+
 });
+
+
+/*
+|--------------------------------------------------------------------------
+| Create optimization job
+|--------------------------------------------------------------------------
+*/
 
 app.post(
     "/api/optimize",
@@ -70,91 +102,210 @@ app.post(
     async (req, res) => {
 
         if (!req.file) {
+
             return res.status(400).json({
                 error: "No video uploaded."
             });
+
         }
+
+        const jobId = crypto.randomUUID();
 
         const inputFile = req.file.path;
 
         const outputFile = path.join(
             processedFolder,
-            `${path.parse(req.file.filename).name}-optimized.mp4`
+            `${jobId}-optimized.mp4`
+        );
+
+        jobs.set(jobId, {
+
+            id: jobId,
+
+            status: "processing",
+
+            progress: 0,
+
+            originalName:
+                req.file.originalname,
+
+            originalSize:
+                req.file.size,
+
+            inputFile,
+
+            outputFile,
+
+            optimizedSize: null,
+
+            error: null,
+
+            startedAt: Date.now(),
+
+            completedAt: null
+
+        });
+
+
+        console.log(
+            `New optimization job: ${jobId}`
         );
 
         console.log(
-            `Received video: ${req.file.originalname}`
+            `File: ${req.file.originalname}`
         );
 
         console.log(
-            `File size: ${(req.file.size / 1024 / 1024).toFixed(2)} MB`
+            `Size: ${(req.file.size / 1024 / 1024).toFixed(2)} MB`
         );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Start FFmpeg
+        |--------------------------------------------------------------------------
+        */
 
         ffmpeg(inputFile)
 
             .videoCodec("libx264")
 
             .outputOptions([
-                "-preset ultrafast",
-                "-crf 23",
+
+                // Good balance between speed and quality
+                "-preset veryfast",
+
+                // High quality while keeping file size reasonable
+                "-crf 20",
+
+                // TikTok/mobile friendly pixel format
                 "-pix_fmt yuv420p",
+
+                // AAC audio
                 "-c:a aac",
-                "-b:a 128k",
+
+                "-b:a 160k",
+
+                // Fast MP4 startup
                 "-movflags +faststart"
+
             ])
 
             .on("start", command => {
-                console.log("FFmpeg started:");
+
+                console.log(
+                    `FFmpeg started for ${jobId}`
+                );
+
                 console.log(command);
+
             })
 
             .on("progress", progress => {
 
-                const percent =
-                    Math.round(progress.percent || 0);
+                let percent =
+                    Math.round(
+                        progress.percent || 0
+                    );
+
+                percent =
+                    Math.max(
+                        0,
+                        Math.min(
+                            99,
+                            percent
+                        )
+                    );
+
+                const job =
+                    jobs.get(jobId);
+
+                if (job) {
+
+                    job.progress =
+                        percent;
+
+                }
 
                 console.log(
-                    `Processing: ${percent}%`
+                    `${jobId}: ${percent}%`
                 );
+
             })
 
             .on("end", () => {
 
+                const job =
+                    jobs.get(jobId);
+
+                if (!job) {
+                    return;
+                }
+
+
+                let optimizedSize = 0;
+
+                try {
+
+                    optimizedSize =
+                        fs.statSync(
+                            outputFile
+                        ).size;
+
+                } catch (error) {
+
+                    console.error(
+                        "Could not read output size:",
+                        error
+                    );
+
+                }
+
+
+                job.status =
+                    "completed";
+
+                job.progress =
+                    100;
+
+                job.optimizedSize =
+                    optimizedSize;
+
+                job.completedAt =
+                    Date.now();
+
+
                 console.log(
-                    "Optimization complete!"
+                    `Optimization complete: ${jobId}`
                 );
 
-                res.download(
-                    outputFile,
-                    "optimized-video.mp4",
-                    error => {
-
-                        fs.unlink(
-                            inputFile,
-                            () => {}
-                        );
-
-                        fs.unlink(
-                            outputFile,
-                            () => {}
-                        );
-
-                        if (error) {
-                            console.error(
-                                "Download error:",
-                                error
-                            );
-                        }
-                    }
+                console.log(
+                    `Output size: ${(optimizedSize / 1024 / 1024).toFixed(2)} MB`
                 );
+
             })
 
             .on("error", error => {
 
                 console.error(
-                    "FFmpeg error:",
+                    `FFmpeg error for ${jobId}:`,
                     error.message
                 );
+
+
+                const job =
+                    jobs.get(jobId);
+
+                if (job) {
+
+                    job.status =
+                        "error";
+
+                    job.error =
+                        error.message;
+
+                }
+
 
                 fs.unlink(
                     inputFile,
@@ -166,33 +317,290 @@ app.post(
                     () => {}
                 );
 
-                if (!res.headersSent) {
-
-                    res.status(500).json({
-                        error:
-                            "Video processing failed.",
-                        details:
-                            error.message
-                    });
-                }
             })
 
             .save(outputFile);
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Immediately tell frontend the job has started
+        |--------------------------------------------------------------------------
+        */
+
+        res.json({
+
+            success: true,
+
+            jobId,
+
+            originalName:
+                req.file.originalname,
+
+            originalSize:
+                req.file.size
+
+        });
+
     }
 );
+
+
+/*
+|--------------------------------------------------------------------------
+| Job status
+|--------------------------------------------------------------------------
+*/
+
+app.get(
+    "/api/status/:jobId",
+    (req, res) => {
+
+        const job =
+            jobs.get(
+                req.params.jobId
+            );
+
+
+        if (!job) {
+
+            return res.status(404).json({
+
+                error:
+                    "Optimization job not found."
+
+            });
+
+        }
+
+
+        res.json({
+
+            success: true,
+
+            jobId:
+                job.id,
+
+            status:
+                job.status,
+
+            progress:
+                job.progress,
+
+            originalName:
+                job.originalName,
+
+            originalSize:
+                job.originalSize,
+
+            optimizedSize:
+                job.optimizedSize,
+
+            error:
+                job.error
+
+        });
+
+    }
+);
+
+
+/*
+|--------------------------------------------------------------------------
+| Download optimized video
+|--------------------------------------------------------------------------
+*/
+
+app.get(
+    "/api/download/:jobId",
+    (req, res) => {
+
+        const job =
+            jobs.get(
+                req.params.jobId
+            );
+
+
+        if (!job) {
+
+            return res.status(404).json({
+
+                error:
+                    "Optimization job not found."
+
+            });
+
+        }
+
+
+        if (
+            job.status !==
+            "completed"
+        ) {
+
+            return res.status(400).json({
+
+                error:
+                    "Video is not ready yet."
+
+            });
+
+        }
+
+
+        if (
+            !fs.existsSync(
+                job.outputFile
+            )
+        ) {
+
+            return res.status(404).json({
+
+                error:
+                    "Optimized video no longer exists."
+
+            });
+
+        }
+
+
+        res.download(
+            job.outputFile,
+            "optimized-video.mp4",
+            error => {
+
+                /*
+                |--------------------------------------------------------------------------
+                | Clean files after download
+                |--------------------------------------------------------------------------
+                */
+
+                fs.unlink(
+                    job.inputFile,
+                    () => {}
+                );
+
+                fs.unlink(
+                    job.outputFile,
+                    () => {}
+                );
+
+                jobs.delete(
+                    job.id
+                );
+
+
+                if (error) {
+
+                    console.error(
+                        "Download error:",
+                        error
+                    );
+
+                }
+
+            }
+        );
+
+    }
+);
+
+
+/*
+|--------------------------------------------------------------------------
+| Cleanup abandoned jobs
+|--------------------------------------------------------------------------
+*/
+
+setInterval(
+    () => {
+
+        const now =
+            Date.now();
+
+        for (
+            const [
+                jobId,
+                job
+            ] of jobs
+        ) {
+
+            /*
+             * Delete jobs older than 30 minutes.
+             */
+
+            if (
+                now -
+                job.startedAt >
+                30 * 60 * 1000
+            ) {
+
+                console.log(
+                    `Cleaning old job: ${jobId}`
+                );
+
+
+                fs.unlink(
+                    job.inputFile,
+                    () => {}
+                );
+
+                fs.unlink(
+                    job.outputFile,
+                    () => {}
+                );
+
+
+                jobs.delete(
+                    jobId
+                );
+
+            }
+
+        }
+
+    },
+    5 * 60 * 1000
+);
+
+
+/*
+|--------------------------------------------------------------------------
+| Error handler
+|--------------------------------------------------------------------------
+*/
 
 app.use(
     (error, req, res, next) => {
 
-        console.error(error);
+        console.error(
+            error
+        );
 
-        if (!res.headersSent) {
+
+        if (
+            !res.headersSent
+        ) {
+
             res.status(400).json({
-                error: error.message
+
+                error:
+                    error.message ||
+                    "Request failed."
+
             });
+
         }
+
     }
 );
+
+
+/*
+|--------------------------------------------------------------------------
+| Start server
+|--------------------------------------------------------------------------
+*/
 
 app.listen(
     PORT,
@@ -201,5 +609,6 @@ app.listen(
         console.log(
             `Doniawik Video Optimizer running on port ${PORT}`
         );
+
     }
 );
