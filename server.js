@@ -9,31 +9,29 @@ const app = express();
 
 const PORT = process.env.PORT || 10000;
 
-// ============================================================
-// DIRECTORIES
-// ============================================================
-
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const OUTPUT_DIR = path.join(__dirname, "processed");
 
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+// Create folders
+if (!fs.existsSync(UPLOAD_DIR)) {
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
 
-// ============================================================
+if (!fs.existsSync(OUTPUT_DIR)) {
+    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+}
+
+// =====================================================
 // MIDDLEWARE
-// ============================================================
+// =====================================================
 
-app.use(cors({
-    origin: true,
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type"]
-}));
+app.use(cors());
 
 app.use(express.json());
 
-// ============================================================
-// MULTER
-// ============================================================
+// =====================================================
+// FILE UPLOAD
+// =====================================================
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -41,104 +39,102 @@ const storage = multer.diskStorage({
     },
 
     filename: (req, file, cb) => {
-        const extension = path.extname(file.originalname).toLowerCase();
+        const ext = path.extname(file.originalname).toLowerCase();
 
-        const filename =
+        const safeName =
             `${Date.now()}-${Math.random()
                 .toString(36)
-                .substring(2, 10)}${extension}`;
+                .substring(2, 10)}${ext}`;
 
-        cb(null, filename);
+        cb(null, safeName);
     }
 });
 
 const upload = multer({
-    storage,
+    storage: storage,
 
     limits: {
         fileSize: 500 * 1024 * 1024
     },
 
     fileFilter: (req, file, cb) => {
-        const extension = path.extname(file.originalname).toLowerCase();
+        const ext = path.extname(file.originalname).toLowerCase();
 
-        if (extension !== ".mp4") {
-            return cb(new Error("Only MP4 files are supported."));
+        if (ext !== ".mp4") {
+            return cb(new Error("Only MP4 videos are supported."));
         }
 
         cb(null, true);
     }
 });
 
-// ============================================================
-// HEALTH CHECK
-// ============================================================
+// =====================================================
+// API STATUS
+// =====================================================
 
 app.get("/", (req, res) => {
-    res.status(200).json({
-        success: true,
-        message: "Video Optimizer API is running!",
-        status: "online"
+    res.json({
+        message: "Video Optimizer API is running!"
     });
 });
 
-// ============================================================
+// =====================================================
 // PROCESS VIDEO
-// ============================================================
+// =====================================================
 
 app.post("/process", upload.single("video"), (req, res) => {
 
     if (!req.file) {
         return res.status(400).json({
-            success: false,
             error: "No video uploaded."
         });
     }
 
     const inputPath = req.file.path;
 
-    const baseName = path.parse(req.file.filename).name;
+    const originalName = path.parse(req.file.originalname).name;
 
-    const outputFilename = `${baseName}-optimized.mp4`;
+    const outputName =
+        `${originalName}-optimized-${Date.now()}.mp4`;
 
-    const outputPath = path.join(
-        OUTPUT_DIR,
-        outputFilename
-    );
+    const outputPath =
+        path.join(OUTPUT_DIR, outputName);
 
-    console.log("========================================");
+    console.log("=================================");
     console.log("NEW VIDEO");
     console.log("Original:", req.file.originalname);
-    console.log("Input:", inputPath);
-    console.log("Output:", outputPath);
-    console.log("========================================");
+    console.log("=================================");
+
+    // -------------------------------------------------
+    // FFmpeg
+    // -------------------------------------------------
 
     ffmpeg(inputPath)
+
         .outputOptions([
-            // Video codec
             "-c:v libx264",
 
-            // High compatibility
+            // Good compatibility
             "-profile:v high",
             "-level:v 4.2",
             "-pix_fmt yuv420p",
 
-            // Quality
+            // High quality
             "-crf 18",
 
-            // Encoding speed
+            // Fast enough for Render
             "-preset veryfast",
 
             // Audio
             "-c:a aac",
             "-b:a 192k",
 
-            // Better MP4 streaming
+            // Web-friendly MP4
             "-movflags +faststart"
         ])
 
         .on("start", command => {
-            console.log("FFmpeg command:");
+            console.log("FFmpeg started:");
             console.log(command);
         })
 
@@ -153,40 +149,36 @@ app.post("/process", upload.single("video"), (req, res) => {
 
         .on("end", () => {
 
-            console.log("========================================");
-            console.log("VIDEO COMPLETE");
-            console.log(outputFilename);
-            console.log("========================================");
+            console.log("VIDEO PROCESSING COMPLETE");
 
-            // Delete temporary upload
+            // Remove temporary upload
             try {
                 fs.unlinkSync(inputPath);
-            } catch (error) {
+            } catch (err) {
                 console.log(
                     "Could not delete upload:",
-                    error.message
+                    err.message
                 );
             }
 
-            return res.status(200).json({
+            return res.json({
                 success: true,
                 message: "Video processed successfully.",
 
-                filename: outputFilename,
+                filename: outputName,
 
+                // Keep this simple for the extension
                 downloadUrl:
-                    `/download/${encodeURIComponent(outputFilename)}`
+                    `/download/${encodeURIComponent(outputName)}`
             });
         })
 
         .on("error", error => {
 
-            console.error("========================================");
-            console.error("FFMPEG ERROR");
+            console.error("FFmpeg error:");
             console.error(error.message);
-            console.error("========================================");
 
-            // Delete uploaded file
+            // Delete input
             try {
                 if (fs.existsSync(inputPath)) {
                     fs.unlinkSync(inputPath);
@@ -202,7 +194,6 @@ app.post("/process", upload.single("video"), (req, res) => {
 
             if (!res.headersSent) {
                 return res.status(500).json({
-                    success: false,
                     error: "Video processing failed.",
                     details: error.message
                 });
@@ -212,85 +203,62 @@ app.post("/process", upload.single("video"), (req, res) => {
         .save(outputPath);
 });
 
-// ============================================================
+// =====================================================
 // DOWNLOAD
-// ============================================================
+// =====================================================
 
 app.get("/download/:filename", (req, res) => {
 
-    // Prevent path traversal
     const filename = path.basename(
         req.params.filename
     );
 
-    const filePath = path.join(
-        OUTPUT_DIR,
-        filename
-    );
+    const filePath =
+        path.join(OUTPUT_DIR, filename);
 
     if (!fs.existsSync(filePath)) {
         return res.status(404).json({
-            success: false,
             error: "Processed video not found."
         });
     }
 
-    res.download(
-        filePath,
-        filename,
-        error => {
-
-            if (error) {
-                console.error(
-                    "Download error:",
-                    error.message
-                );
-            }
-        }
-    );
+    res.download(filePath, filename);
 });
 
-// ============================================================
+// =====================================================
 // ERROR HANDLER
-// ============================================================
+// =====================================================
 
-app.use((error, req, res, next) => {
+app.use((err, req, res, next) => {
 
-    console.error("Server error:", error);
+    console.error("Server error:", err.message);
 
-    if (error instanceof multer.MulterError) {
+    if (err instanceof multer.MulterError) {
 
-        if (error.code === "LIMIT_FILE_SIZE") {
+        if (err.code === "LIMIT_FILE_SIZE") {
             return res.status(413).json({
-                success: false,
                 error: "Maximum file size is 500 MB."
             });
         }
 
         return res.status(400).json({
-            success: false,
-            error: error.message
+            error: err.message
         });
     }
 
     return res.status(400).json({
-        success: false,
-        error: error.message || "Something went wrong."
+        error: err.message || "Something went wrong."
     });
 });
 
-// ============================================================
-// START
-// ============================================================
+// =====================================================
+// START SERVER
+// =====================================================
 
 app.listen(PORT, "0.0.0.0", () => {
 
-    console.log("");
-    console.log("========================================");
-    console.log(" DONIAWIK VIDEO OPTIMIZER");
-    console.log("========================================");
-    console.log(` Server running on port ${PORT}`);
-    console.log(" API: ONLINE");
-    console.log("========================================");
-    console.log("");
+    console.log("---------------------------------");
+    console.log("DONIAWIK VIDEO OPTIMIZER");
+    console.log(`Running on port ${PORT}`);
+    console.log("---------------------------------");
 });
